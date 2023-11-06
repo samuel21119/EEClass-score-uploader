@@ -1,98 +1,90 @@
 import re
 import sys
+import asyncio
 import requests
 import openpyxl
 
 from bs4 import BeautifulSoup
 from urllib.parse import urlencode
+from submit import submit_score
 
 custom_url = 'https://eeclass.nthu.edu.tw/homework/report'
-with open("cookie.txt") as f:
-    cookie = f.read()
+with open("cookie.txt", encoding="utf-8") as f:
+    cookie_file = f.read()
 
+cookie_file = cookie_file.split(';')
+cookie = {}
+for i in cookie_file:
+    name, value = i.split('=')
+    name = name.lstrip()
+    cookie[name] = value.replace("\n", "")
+print(cookie)
 
 
 def submit(homeworkid, reportid, score, note, ajaxauth):
     note = note.replace('\n', '<br/>')
+    submit_score(homeworkid, reportid, ajaxauth, score, note)
     
-    post_data = {
-        '_fmSubmit': 'yes',
-        'formVer': '3.0',
-        'formId': 'homework-audit-setting-form',
-        'reportId': str(reportid),
-        'auditScore': str(score),
-        'auditNote': note
-    }
-    query_params = {
-        'homeworkId': homeworkid,
-        'reportId': reportid,
-        'ajaxAuth': ajaxauth,
-        '_pageMode': "audit",
-        '_lock': '_pageMode,homeworkId,reportId'
-    }
-    query_string = urlencode(query_params)
-    url = f"{custom_url}/?{query_string}"
-    custom_headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/119.0',
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'Cookie': cookie,
-        'Accept': "application/json, text/javascript, */*; q=0.01",
-        'Host': "eeclass.nthu.edu.tw",
-        'Referer': url
-    }
-    response = requests.post(url, data=post_data, headers=custom_headers)
-    if response.status_code == 200:
-        print('Request success:', response.text)
+
+async def getAjax(studentID, reportID, headers, cookie):
+    print(studentID)
+    response2 = requests.get(f"https://eeclass.nthu.edu.tw/homework/report/{reportID}", headers=headers, cookies=cookie, timeout=10)
+    if response2.status_code == 200:
+        submit_report = re.search(r'\/homework\/report/.*ajaxAuth.*\'>', response2.text)
+        report_url = submit_report.group(0)
+        report_url = "https://eeclass.nthu.edu.tw" + report_url[:report_url.index('\'')]
+
+        response3 = requests.get(report_url, headers=headers, cookies=cookie, timeout=10)
+        if response3.status_code == 200:
+            soup2 = BeautifulSoup(response3.text, 'html.parser')
+            form_url = soup2.find('form', {'id': 'homework-audit-setting-form'})['action']
+            ajax = 'ajaxAuth='
+            ajaxauth = form_url[form_url.index(ajax) + len(ajax):]
+            print([studentID, reportID, ajaxauth])
+            return [studentID, reportID, ajaxauth]
+        else:
+            print(f"Student: {studentID} error")
+            return []
     else:
-        print('Request fail:', response.text)
-        print(response.status_code)
+        print(f"Student: {studentID} error")
 
-def getSubmissionList(homeworkId):
-    url = f"https://eeclass.nthu.edu.tw/homework/submitList/{homeworkId}"
+
+async def getSubmissionList(homeworkID, page=1):
+    url = f"https://eeclass.nthu.edu.tw/homework/submitList/{homeworkID}?order=account&precedence=ASC&page={page}"
     custom_headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/119.0',
         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'Cookie': cookie,
         'Accept': "application/json, text/javascript, */*; q=0.01",
         'Host': "eeclass.nthu.edu.tw",
         'Referer': url
     }
-
-    
-    response = requests.get(url, headers=custom_headers)
-    print(response.status_code)
-    ret = []
-    if response.status_code == 200:
-        # 使用 BeautifulSoup 解析 HTML 內容
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # 找到所有的 <tr> 元素
-        tr_elements = soup.find('table', {'id': 'submitList_table'}).find('tbody').find_all('tr')
-
-        # 遍歷每個 <tr> 元素並列印其內容
+    async def process_tr_elements(tr_elements):
+        tasks = []
         for tr in tr_elements:
-            studentId = tr.find('div', {'class': 'fs-hint'}).text
+            studentID = tr.find('div', {'class': 'fs-hint'}).text
             strtr = str(tr)
             ajaxauth_match = re.search(r'ajaxAuth=([\w\d]+)', strtr)
             report_match = re.search(r'report/\d+/', strtr)
             if report_match:
                 reportID = report_match.group(0).replace("report", "").replace("/", "")
-
-                response2 = requests.get(f"https://eeclass.nthu.edu.tw/homework/report/{reportID}", headers=custom_headers)
-                if response2.status_code == 200:
-                    submit_report = re.search(r'\/homework\/report/.*ajaxAuth.*\'>', response2.text)
-                    report_url = submit_report.group(0)
-                    report_url = "https://eeclass.nthu.edu.tw" + report_url[:report_url.index('\'')]
-
-                    response3 = requests.get(report_url, headers=custom_headers)
-                    if response3.status_code == 200:
-                        soup2 = BeautifulSoup(response3.text, 'html.parser')
-                        form_url = soup2.find('form', {'id': 'homework-audit-setting-form'})['action']
-                        ajax = 'ajaxAuth='
-                        ajaxauth = form_url[form_url.index(ajax) + len(ajax):]
-                        ret.append([studentId, reportID, ajaxauth])
+                task = getAjax(studentID, reportID, custom_headers, cookie)
+                tasks.append(task)
             else:
-                print(f"Student: {studentId} error")
+                print(f"Student: {studentID} error")
+        results = await asyncio.gather(*tasks)
+        return results
+    
+    response = requests.get(url, headers=custom_headers, cookies=cookie)
+    if response.status_code == 200:
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        tr_elements = soup.find('table', {'id': 'submitList_table'}).find('tbody').find_all('tr')
+
+        ret = list(await process_tr_elements(tr_elements))
+        # print(ret)
+        if (len(ret) % 50 == 0):
+            next_ret = await getSubmissionList(homeworkID, page+1)
+            ret.extend(next_ret)
     return ret
             
 def findStudentGrade(studentID, sheet):
@@ -120,7 +112,7 @@ def main():
     workbook = openpyxl.load_workbook(file)
     sheet = workbook.active
 
-    sub_list = getSubmissionList(homeworkID)
+    sub_list = asyncio.run(getSubmissionList(homeworkID))
     for i in sub_list:
         studentID = i[0]
         reportID = i[1]
@@ -129,6 +121,9 @@ def main():
         if (grade is None) or (comment is None):
             print(f"Student: {studentID} grade not found!")
         else:
+            if grade > 100:
+                print(f"Student {studentID} grade = {grade} > 100. Only score 100 is submited!!!")
+                grade = 100
             submit(homeworkID, reportID, grade, comment, ajaxauth)
 
 if __name__ == "__main__":
